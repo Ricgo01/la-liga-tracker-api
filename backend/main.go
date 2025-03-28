@@ -3,15 +3,14 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
-
-	//"strconv"
 
 	"github.com/gorilla/mux"
 	_ "modernc.org/sqlite"
 )
+
+var db *sql.DB
 
 type Match struct {
 	ID        int    `json:"id"`
@@ -20,16 +19,12 @@ type Match struct {
 	MatchDate string `json:"matchDate"`
 }
 
-var db *sql.DB
-
 func initDB() {
 	var err error
-
 	db, err = sql.Open("sqlite", "liga.db")
 	if err != nil {
-		log.Fatal("Error al abrir la base de datos:", err)
+		log.Fatal(err)
 	}
-
 	createTableSQL := `
 	CREATE TABLE IF NOT EXISTS matches (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -37,51 +32,104 @@ func initDB() {
 		away_team TEXT NOT NULL,
 		match_date TEXT NOT NULL
 	);`
-
 	_, err = db.Exec(createTableSQL)
 	if err != nil {
-		log.Fatal("Error al crear la tabla:", err)
+		log.Fatal(err)
 	}
-
-	fmt.Println("Base de datos conectada")
 }
 
-func getMatches(w http.ResponseWriter, r *http.Request) {
+func getAllMatches(w http.ResponseWriter, r *http.Request) {
 	rows, err := db.Query("SELECT id, home_team, away_team, match_date FROM matches")
 	if err != nil {
-		http.Error(w, "Error al consultar los partidos", http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
 
 	var matches []Match
-
 	for rows.Next() {
-		var match Match
-		err := rows.Scan(&match.ID, &match.HomeTeam, &match.AwayTeam, &match.MatchDate)
+		var m Match
+		err := rows.Scan(&m.ID, &m.HomeTeam, &m.AwayTeam, &m.MatchDate)
 		if err != nil {
-			http.Error(w, "Error al leer los datos", http.StatusInternalServerError)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		matches = append(matches, match)
+		matches = append(matches, m)
 	}
-
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(matches)
 }
 
-func pingHandler(w http.ResponseWriter, r *http.Request) {
+func getMatchByID(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	row := db.QueryRow("SELECT id, home_team, away_team, match_date FROM matches WHERE id = ?", id)
+	var m Match
+	err := row.Scan(&m.ID, &m.HomeTeam, &m.AwayTeam, &m.MatchDate)
+	if err == sql.ErrNoRows {
+		http.Error(w, "Partido no encontrado", http.StatusNotFound)
+		return
+	} else if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(m)
+}
+
+func createMatch(w http.ResponseWriter, r *http.Request) {
+	var m Match
+	err := json.NewDecoder(r.Body).Decode(&m)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	_, err = db.Exec("INSERT INTO matches (home_team, away_team, match_date) VALUES (?, ?, ?)", m.HomeTeam, m.AwayTeam, m.MatchDate)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+}
+
+func updateMatch(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	var m Match
+	err := json.NewDecoder(r.Body).Decode(&m)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	_, err = db.Exec("UPDATE matches SET home_team = ?, away_team = ?, match_date = ? WHERE id = ?", m.HomeTeam, m.AwayTeam, m.MatchDate, id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
+}
+
+func deleteMatch(w http.ResponseWriter, r *http.Request) {
+	id := mux.Vars(r)["id"]
+	_, err := db.Exec("DELETE FROM matches WHERE id = ?", id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func ping(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("pong"))
 }
 
 func main() {
-
 	initDB()
-	router := mux.NewRouter()
-	router.HandleFunc("/api/matches", getMatches).Methods("GET")
+	r := mux.NewRouter()
+	r.HandleFunc("/ping", ping).Methods("GET")
+	r.HandleFunc("/api/matches", getAllMatches).Methods("GET")
+	r.HandleFunc("/api/matches/{id}", getMatchByID).Methods("GET")
+	r.HandleFunc("/api/matches", createMatch).Methods("POST")
+	r.HandleFunc("/api/matches/{id}", updateMatch).Methods("PUT")
+	r.HandleFunc("/api/matches/{id}", deleteMatch).Methods("DELETE")
 
-	fmt.Println("Servidor corriendo en puerto 8080")
-	log.Fatal(http.ListenAndServe(":8080", router))
-
+	http.ListenAndServe(":8080", r)
 }
